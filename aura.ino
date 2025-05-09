@@ -233,6 +233,7 @@ void setup() {
   TFT_eSPI tft = TFT_eSPI();
   tft.init();
   pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
+  analogWrite(LCD_BACKLIGHT_PIN, brightness); // Set backlight to saved brightness
 
   lv_init();
 
@@ -255,7 +256,7 @@ void setup() {
   use_fahrenheit = prefs.getBool("useFahrenheit", false);
   location = prefs.getString("location", LOCATION_DEFAULT);
   uint32_t brightness = prefs.getUInt("brightness", 255);
-  analogWrite(LCD_BACKLIGHT_PIN, brightness);
+  // analogWrite(LCD_BACKLIGHT_PIN, brightness); // Comment this out for now
   
   // Check for Wi-Fi config and request it if not available
   WiFiManager wm;
