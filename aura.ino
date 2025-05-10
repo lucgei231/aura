@@ -34,12 +34,67 @@ int x, y, z;
 // Preferences
 static Preferences prefs;
 static bool use_fahrenheit = false;
+static bool is_24_hour = false;
 static char latitude[16] = LATITUDE_DEFAULT;
 static char longitude[16] = LONGITUDE_DEFAULT;
 static String location = String(LOCATION_DEFAULT);
 static char dd_opts[512];
 static DynamicJsonDocument geoDoc(8 * 1024);
 static JsonArray geoResults;
+
+// Language support
+struct LanguageOption {
+  const char* code;
+  const char* name;
+  const char* flag;
+};
+
+// Example subset, scalable to all languages
+static LanguageOption languages[] = {
+  {"en", "English", "🇬🇧"},
+  {"es", "Español", "🇪🇸"},
+  {"fr", "Français", "🇫🇷"},
+  {"de", "Deutsch", "🇩🇪"},
+  {"zh", "中文", "🇨🇳"},
+  {"ru", "Русский", "🇷🇺"},
+  {"ar", "العربية", "🇸🇦"},
+  {"hi", "हिन्दी", "🇮🇳"},
+  {"ja", "日本語", "🇯🇵"},
+  {"pt", "Português", "🇵🇹"},
+  // ... add more as needed ...
+};
+static const int NUM_LANGUAGES = sizeof(languages) / sizeof(languages[0]);
+static int current_language = 0;
+static lv_obj_t* btn_flag = nullptr;
+static lv_obj_t* dd_lang = nullptr;
+static lv_obj_t* btn_lang = nullptr;
+
+// Simple translation function (expand as needed)
+const char* tr(const char* key) {
+  // Example translation table (expand for all keys/languages)
+  static const char* table[][10] = {
+    // en, es, fr, de, zh, ru, ar, hi, ja, pt
+    {"Aura Settings", "Configuración", "Paramètres", "Einstellungen", "设置", "Настройки", "الإعدادات", "सेटिंग्स", "設定", "Configurações"},
+    {"12/24 hour:", "12/24 horas:", "12/24 heures:", "12/24 Stunden:", "12/24小时:", "12/24 часов:", "12/24 ساعة:", "12/24 घंटे:", "12/24時間:", "12/24 horas:"},
+    {"Brightness:", "Brillo:", "Luminosité:", "Helligkeit:", "亮度:", "Яркость:", "السطوع:", "चमक:", "明るさ:", "Brilho:"},
+    {"Location", "Ubicación", "Emplacement", "Standort", "位置", "Местоположение", "الموقع", "स्थान", "場所", "Localização"},
+    {"Use °F:", "Usar °F:", "Utiliser °F:", "Verwende °F:", "使用°F:", "Исп. °F:", "استخدم °F:", "°F का उपयोग करें:", "°Fを使う:", "Usar °F:"},
+    {"Reset Wi-Fi", "Restablecer Wi-Fi", "Réinitialiser Wi-Fi", "WLAN zurücksetzen", "重置Wi-Fi", "Сбросить Wi-Fi", "إعادة تعيين Wi-Fi", "वाई-फाई रीसेट करें", "Wi-Fiリセット", "Redefinir Wi-Fi"},
+    {"Close", "Cerrar", "Fermer", "Schließen", "关闭", "Закрыть", "إغلاق", "बंद करें", "閉じる", "Fechar"},
+    {"Save", "Guardar", "Enregistrer", "Speichern", "保存", "Сохранить", "حفظ", "सहेजें", "保存", "Salvar"},
+    {"Cancel", "Cancelar", "Annuler", "Abbrechen", "取消", "Отмена", "إلغاء", "रद्द करें", "キャンセル", "Cancelar"},
+    {"Change Location", "Cambiar ubicación", "Changer d'emplacement", "Standort ändern", "更改位置", "Изменить местоположение", "تغيير الموقع", "स्थान बदलें", "場所を変更", "Alterar Localização"},
+  };
+  static const char* keys[] = {
+    "Aura Settings", "12/24 hour:", "Brightness:", "Location", "Use °F:", "Reset Wi-Fi", "Close", "Save", "Cancel", "Change Location"
+  };
+  for (int i = 0; i < 10; ++i) {
+    if (strcmp(keys[i], key) == 0) {
+      return table[i][current_language];
+    }
+  }
+  return key;
+}
 
 // UI components
 static lv_obj_t *lbl_today_temp;
@@ -174,13 +229,14 @@ static void update_clock(lv_timer_t *timer) {
   if (!getLocalTime(&timeinfo)) return;
 
   char buf[16];
-  int hour = timeinfo.tm_hour % 12;
-  int minute = timeinfo.tm_min;
-  const char *ampm = (timeinfo.tm_hour < 12) ? "am" : "pm";
-
-  if(hour == 0) hour = 12;
-  snprintf(buf, sizeof(buf), "%d:%02d%s", hour, minute, ampm);
-
+  if (is_24_hour) {
+    snprintf(buf, sizeof(buf), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+  } else {
+    int hour = timeinfo.tm_hour % 12;
+    if(hour == 0) hour = 12;
+    const char *ampm = (timeinfo.tm_hour < 12) ? "am" : "pm";
+    snprintf(buf, sizeof(buf), "%d:%02d%s", hour, timeinfo.tm_min, ampm);
+  }
   lv_label_set_text(lbl_clock, buf);
 }
 
@@ -233,7 +289,7 @@ void setup() {
   TFT_eSPI tft = TFT_eSPI();
   tft.init();
   pinMode(LCD_BACKLIGHT_PIN, OUTPUT);
-  analogWrite(LCD_BACKLIGHT_PIN, brightness); // Set backlight to saved brightness
+
 
   lv_init();
 
@@ -256,6 +312,8 @@ void setup() {
   use_fahrenheit = prefs.getBool("useFahrenheit", false);
   location = prefs.getString("location", LOCATION_DEFAULT);
   uint32_t brightness = prefs.getUInt("brightness", 255);
+  is_24_hour = prefs.getBool("is24Hour", false); // Load 12/24h setting
+  current_language = prefs.getInt("language", 0); // Load language setting
   // analogWrite(LCD_BACKLIGHT_PIN, brightness); // Comment this out for now
   
   // Check for Wi-Fi config and request it if not available
@@ -634,50 +692,105 @@ void create_settings_window() {
   if (settings_win) return;
 
   settings_win = lv_win_create(lv_scr_act());
-  lv_obj_t *title = lv_win_add_title(settings_win, "Aura Settings");
+  lv_obj_set_size(settings_win, SCREEN_WIDTH, SCREEN_HEIGHT);
+  lv_obj_center(settings_win);
+
+  lv_obj_t *title = lv_win_add_title(settings_win, tr("Aura Settings"));
   lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
   lv_obj_set_style_margin_left(title, 10, 0);
 
-  lv_obj_center(settings_win);
-  lv_obj_set_width(settings_win, 240);
+  // Add language code button as a normal blue button next to the title in the top bar
+  btn_lang = lv_btn_create(settings_win);
+  lv_obj_set_size(btn_lang, 40, 32);
+  lv_obj_set_style_bg_color(btn_lang, lv_palette_main(LV_PALETTE_BLUE), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_text_color(btn_lang, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_radius(btn_lang, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_border_width(btn_lang, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_shadow_width(btn_lang, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_pad_all(btn_lang, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_outline_width(btn_lang, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_clear_flag(btn_lang, LV_OBJ_FLAG_SCROLLABLE);
+  // Place the button to the right of the title
+  lv_obj_align_to(btn_lang, title, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
+  lv_obj_t *lbl_flag = lv_label_create(btn_lang);
+  lv_label_set_text(lbl_flag, languages[current_language].code);
+  lv_obj_center(lbl_flag);
+
+  // Dropdown for language selection (hidden by default)
+  static lv_obj_t *lang_dd = NULL;
+  if (!lang_dd) {
+    lang_dd = lv_dropdown_create(settings_win);
+    String opts = "";
+    for (int i = 0; i < NUM_LANGUAGES; ++i) {
+      opts += String(languages[i].code) + " " + languages[i].name + "\n";
+    }
+    lv_dropdown_set_options(lang_dd, opts.c_str());
+    lv_obj_add_flag(lang_dd, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(lang_dd, 120);
+    lv_obj_align_to(lang_dd, btn_lang, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+  }
+
+  lv_obj_add_event_cb(btn_lang, [](lv_event_t *e){
+    if (lv_obj_has_flag(lang_dd, LV_OBJ_FLAG_HIDDEN)) {
+      lv_obj_clear_flag(lang_dd, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(lang_dd, LV_OBJ_FLAG_HIDDEN);
+    }
+  }, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_add_event_cb(lang_dd, [](lv_event_t *e){
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+      int sel = lv_dropdown_get_selected((lv_obj_t*)lv_event_get_target(e));
+      current_language = sel;
+      prefs.putInt("language", sel);
+      // Update code
+      lv_label_set_text(lv_obj_get_child(btn_lang, 0), languages[sel].code);
+      // Hide dropdown
+      lv_obj_add_flag(lang_dd, LV_OBJ_FLAG_HIDDEN);
+      // Recreate settings window for new language
+      lv_obj_del(settings_win);
+      settings_win = nullptr;
+      create_settings_window();
+    }
+  }, LV_EVENT_VALUE_CHANGED, NULL);
 
   lv_obj_t *cont = lv_win_get_content(settings_win);
   // 12/24 hour toggle next to the celsius/farentheight button
   lv_obj_t *lbl_clock = lv_label_create(cont);
-  lv_label_set_text(lbl_clock, "12/24 hour:");
+  lv_label_set_text(lbl_clock, tr("12/24 hour:"));
   lv_obj_align(lbl_clock, LV_ALIGN_TOP_LEFT, 0, 10);
   lv_obj_t *btn_12h = lv_btn_create(cont);
   lv_obj_set_size(btn_12h, 80, 40);
   lv_obj_align_to(btn_12h, lbl_clock, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+  if (is_24_hour) {
+    lv_obj_add_state(btn_12h, LV_STATE_CHECKED);
+  } else {
+    lv_obj_clear_state(btn_12h, LV_STATE_CHECKED);
+  }
+  lv_obj_t *lbl_12h = lv_label_create(btn_12h);
+  lv_label_set_text(lbl_12h, is_24_hour ? "24h" : "12h");
+  lv_obj_center(lbl_12h);
   lv_obj_add_event_cb(btn_12h, [](lv_event_t *e){
     lv_obj_t *btn = (lv_obj_t*)lv_event_get_target(e);
+    lv_obj_t *lbl = lv_obj_get_child(btn, 0); // get the label inside the button
     if (lv_obj_has_state(btn, LV_STATE_CHECKED)) {
       lv_obj_clear_state(btn, LV_STATE_CHECKED);
+      is_24_hour = false;
       prefs.putBool("is24Hour", false);
+      lv_label_set_text(lbl, "12h");
     } else {
       lv_obj_add_state(btn, LV_STATE_CHECKED);
+      is_24_hour = true;
       prefs.putBool("is24Hour", true);
+      lv_label_set_text(lbl, "24h");
     }
+    update_clock(nullptr); // Immediately update clock
   }, LV_EVENT_CLICKED, NULL);
-  lv_obj_t *lbl_12h = lv_label_create(btn_12h);
-  lv_label_set_text(lbl_12h, "12h");
-  lv_obj_center(lbl_12h);
-  lv_obj_set_style_bg_color(btn_12h, lv_palette_main(LV_PALETTE_GREY), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_opa(btn_12h, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_color(btn_12h, lv_palette_darken(LV_PALETTE_GREY, 1), LV_PART_MAIN | LV_STATE_PRESSED);
-  lv_obj_set_style_text_color(btn_12h, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_text_color(btn_12h, lv_color_white(), LV_PART_MAIN | LV_STATE_PRESSED);
-  lv_obj_set_style_radius(btn_12h, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_radius(btn_12h, 4, LV_PART_MAIN | LV_STATE_PRESSED);
-  lv_obj_set_style_bg_color(btn_12h, lv_palette_main(LV_PALETTE_GREY), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_opa(btn_12h, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_color(btn_12h, lv_palette_darken(LV_PALETTE_GREY, 1), LV_PART_MAIN | LV_STATE_PRESSED);
-  lv_obj_set_style_text_color(btn_12h, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_text_color(btn_12h, lv_color_white(), LV_PART_MAIN | LV_STATE_PRESSED);
-  // Brightness
+
+  // Brightness (moved up to where Location was)
   lv_obj_t *lbl_b = lv_label_create(cont);
-  lv_label_set_text(lbl_b, "Brightness:");
-  lv_obj_align(lbl_b, LV_ALIGN_TOP_LEFT, 0, 10);
+  lv_label_set_text(lbl_b, tr("Brightness:"));
+  lv_obj_align(lbl_b, LV_ALIGN_TOP_LEFT, 0, 85);
   lv_obj_t *slider = lv_slider_create(cont);
   lv_slider_set_range(slider, 10, 255);
   uint32_t saved_b = prefs.getUInt("brightness", 128);
@@ -692,24 +805,16 @@ void create_settings_window() {
     prefs.putUInt("brightness", v);
   }, LV_EVENT_VALUE_CHANGED, NULL);
 
-  lv_obj_t *lbl_loc_l = lv_label_create(cont);
-  lv_label_set_text(lbl_loc_l, "Location:");
-  lv_obj_align(lbl_loc_l, LV_ALIGN_TOP_LEFT, 0, 85);
-
-  lbl_loc = lv_label_create(cont);
-  lv_label_set_text(lbl_loc, location.c_str());
-  lv_obj_align_to(lbl_loc, lbl_loc_l, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
-
   lv_obj_t *btn_change_loc = lv_btn_create(cont);
   lv_obj_align(btn_change_loc, LV_ALIGN_TOP_LEFT, 0, 130);
   lv_obj_set_size(btn_change_loc, 100, 40);
   lv_obj_add_event_cb(btn_change_loc, change_location_event_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t *lbl_chg = lv_label_create(btn_change_loc);
-  lv_label_set_text(lbl_chg, "Location");
+  lv_label_set_text(lbl_chg, tr("Location"));
   lv_obj_center(lbl_chg);
 
   lv_obj_t *lbl_u = lv_label_create(cont);
-  lv_label_set_text(lbl_u, "Use °F:");
+  lv_label_set_text(lbl_u, tr("Use °F:"));
   lv_obj_align(lbl_u, LV_ALIGN_TOP_LEFT, 0, 48);
 
   unit_switch = lv_switch_create(cont);
@@ -740,7 +845,7 @@ void create_settings_window() {
   lv_obj_add_event_cb(btn_reset, reset_wifi_event_handler, LV_EVENT_CLICKED, nullptr);
 
   lv_obj_t *lbl_reset = lv_label_create(btn_reset);
-  lv_label_set_text(lbl_reset, "Reset Wi-Fi");
+  lv_label_set_text(lbl_reset, tr("Reset Wi-Fi"));
   lv_obj_center(lbl_reset);
 
   btn_close_obj = lv_btn_create(cont);
@@ -749,7 +854,7 @@ void create_settings_window() {
   lv_obj_add_event_cb(btn_close_obj, settings_event_handler, LV_EVENT_CLICKED, NULL);
 
   lv_obj_t *lbl_btn = lv_label_create(btn_close_obj);
-  lv_label_set_text(lbl_btn, "Close");
+  lv_label_set_text(lbl_btn, tr("Close"));
   lv_obj_center(lbl_btn);
 }
 
